@@ -11,9 +11,25 @@ import sciris as sc
 import seaborn as sns
 import optuna as op
 from . import experiment as fpe
+import ray
 
 
 __all__ = ['Calibration']
+
+
+
+####
+# Ray remote functions cannot be members of a class unless the entire class is a ray actor
+####
+@ray.remote
+def run_workers(calib):
+    serial = calib.g.n_workers == 1
+    output = sc.parallelize(calib.worker, iterarg=calib.g.n_workers,
+                            serial=serial)  # Will run in serial if there is only 1 worker
+
+    ''' Run multiple workers in parallel '''
+    # output = sc.parallelize(self.worker, self.g.n_workers)
+    return output
 
 
 class Calibration(sc.prettyobj):
@@ -62,9 +78,15 @@ class Calibration(sc.prettyobj):
         ''' Create a (mutable) dictionary with default global settings '''
         ''' Set defaults for Optuna '''
         g = sc.objdict()
-        g.name      = 'fpsim_calibration'
-        g.db_name   = f'{g.name}.db'
-        g.storage   = f'sqlite:///{g.db_name}'
+        g.name      = 'fpsim1'
+        g.storage="postgresql://{}:{}@postgres:5432/{}".format(
+            #"optuna",
+            #"superSecretPassword",
+            #"optunaDatabase",
+            os.environ["POSTGRES_USER"],
+            os.environ["POSTGRES_PASSWORD"],
+            os.environ["POSTGRES_DB"],
+        )
         g.n_trials  = 20  # Define the number of trials, i.e. sim runs, per worker
         g.n_workers = sc.cpu_count()
         self.g = g
@@ -174,31 +196,9 @@ class Calibration(sc.prettyobj):
         return output
 
 
-    def run_workers(self):
-
-        serial = self.g.n_workers == 1
-        output = sc.parallelize(self.worker, iterarg=self.g.n_workers, serial=serial)  # Will run in serial if there is only 1 worker
-
-        ''' Run multiple workers in parallel '''
-        #output = sc.parallelize(self.worker, self.g.n_workers)
-        return output
-
-
-    def remove_db(self):
-        '''
-        Remove the database file if keep_db is false and the path exists.
-        '''
-        if os.path.exists(self.g.db_name):
-            os.remove(self.g.db_name)
-            if self.verbose:
-                print(f'Removed existing calibration {self.g.db_name}')
-        return
 
     def make_study(self):
-        ''' Make a study, deleting one if it already exists '''
-        if not self.keep_db:
-            self.remove_db()
-        output = op.create_study(storage=self.g.storage, study_name=self.g.name)
+        output = op.create_study(storage=self.g.storage, study_name=self.g.name, load_if_exists=True)
         return output
 
 
@@ -222,7 +222,12 @@ class Calibration(sc.prettyobj):
             print(self.g)
         t0 = sc.tic()
         self.make_study()
-        self.run_workers()
+
+        #TODO: make n_pods configurable
+        n_pods = 4
+        futures = [run_workers.remote(self) for x in range(n_pods)]
+        ray.get(futures)
+
         self.study = op.load_study(storage=self.g.storage, study_name=self.g.name)
         self.best_pars = self.study.best_params
         T = sc.toc(t0, output=True)
@@ -236,8 +241,6 @@ class Calibration(sc.prettyobj):
         self.parse_study()
 
         # Tidy up
-        if not self.keep_db:
-            self.remove_db()
         if verbose:
             self.summarize()
 

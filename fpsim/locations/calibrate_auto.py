@@ -31,8 +31,10 @@ import sciris as sc
 import fpsim as fp
 import pylab as pl
 import seaborn as sns
+import ray
 
 if __name__ == '__main__':
+        ray.init(address="auto")
         ####################################################
         # GLOBAL VARIABLES: USER MUST SET
 
